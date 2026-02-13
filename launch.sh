@@ -12,9 +12,14 @@ echo "$0" "$@"
 cd "$PAK_DIR" || exit 1
 mkdir -p "$USERDATA_PATH/$PAK_NAME"
 
+architecture=arm
+if uname -m | grep -q '64'; then
+	architecture=arm64
+fi
+
 export HOME="$USERDATA_PATH/$PAK_NAME"
 export LD_LIBRARY_PATH="$PAK_DIR/lib/$PLATFORM:$LD_LIBRARY_PATH"
-export PATH="$PAK_DIR/bin/$PLATFORM:$PAK_DIR/bin:$PATH"
+export PATH="$PAK_DIR/bin/$architecture:$PAK_DIR/bin/$PLATFORM:$PAK_DIR/bin:$PATH"
 
 export ROM_NAME="$(basename -- "$*")"
 export GAMESETTINGS_DIR="$USERDATA_PATH/$PAK_NAME/game-settings/$ROM_NAME"

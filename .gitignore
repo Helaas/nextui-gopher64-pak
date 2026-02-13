@@ -1,0 +1,11 @@
+.DS_Store
+bin/.DS_Store
+
+.build/
+pak.zip
+
+# Downloaded helper binaries
+bin/arm64/
+bin/tg5050/emit-key
+bin/tg5050/minui-list
+bin/tg5050/minui-presenter
