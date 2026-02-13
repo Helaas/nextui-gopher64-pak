@@ -121,8 +121,11 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--target=aarch
 ENV CFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --sysroot=${SYSROOT} -march=armv8.2-a"
 ENV CXXFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --sysroot=${SYSROOT} -march=armv8.2-a"
 ENV PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+ENV PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu="${SYSROOT}"
 ENV PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+ENV PKG_CONFIG_PATH_aarch64_unknown_linux_gnu="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 ENV PKG_CONFIG_ALLOW_CROSS="1"
+ENV PKG_CONFIG_aarch64_unknown_linux_gnu="pkg-config"
 ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --sysroot=${SYSROOT}"
 
 # Create a static library with C++ ABI stubs for symbols present in host's
