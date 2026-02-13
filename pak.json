@@ -1,0 +1,11 @@
+{
+  "name": "N64-gopher64",
+  "type": "EMU",
+  "description": "Runs gopher64 standalone N64 emulator with Vulkan parallel-rdp renderer",
+  "author": "kevinvranken",
+  "platforms": [
+    "tg5050"
+  ],
+  "launch": "launch.sh",
+  "version": "0.1.0"
+}

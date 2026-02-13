@@ -1,0 +1,80 @@
+#!/bin/sh
+BIN_DIR="$(dirname "$0")"
+PAK_DIR="$(dirname "$(dirname "$BIN_DIR")")"
+PAK_NAME="$(basename "$PAK_DIR")"
+PAK_NAME="${PAK_NAME%.*}"
+
+rm -f "$LOGS_PATH/$PAK_NAME.menu-button.txt"
+exec >>"$LOGS_PATH/$PAK_NAME.menu-button.txt"
+exec 2>&1
+
+echo "$0" "$@"
+cd "$PAK_DIR" || exit 1
+
+MENU_DEVICE="/dev/input/event3"
+BUTTON_CODE="code 316 (BTN_MODE)"
+
+main() {
+	PROCESS_PID="$1"
+
+	just_pressed=false
+	is_pressed=false
+	skip_next_menu=false
+
+	value_unpressed="value 0"
+	value_pressed="value 1"
+	value_held="value 2"
+
+	game_name="$(cat "$SDCARD_PATH/.userdata/shared/.minui/recent.txt" 2>/dev/null | head -n1 | cut -d'	' -f2)"
+	if [ -z "$game_name" ]; then
+		game_name="N64 Game"
+	fi
+
+	evtest "$MENU_DEVICE" 2>/dev/null | while read -r line; do
+		now="$(coreutils date +%s%N)"
+		now="${now%??????}"
+
+		if echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_pressed"; then
+			if [ "$is_pressed" = "false" ] && [ "$skip_next_menu" = "false" ]; then
+				just_pressed=true
+			else
+				just_pressed=false
+			fi
+			skip_next_menu=false
+			is_pressed=true
+		elif echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_unpressed"; then
+			just_pressed=false
+			is_pressed=false
+		elif echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_held"; then
+			is_pressed=true
+			just_pressed=false
+		elif echo "$line" | grep -q -v "$BUTTON_CODE"; then
+			continue
+		fi
+
+		if [ "$just_pressed" = "true" ]; then
+			minui-list --file "$PAK_DIR/res/menu.json" --title "$game_name" --confirm-text "OKAY" --cancel-text "BACK" --write-value state --write-location /tmp/minui-list-state --item-key menu
+			exit_code=$?
+			if [ "$exit_code" -ne 0 ]; then
+				if [ "$exit_code" -eq 3 ]; then
+					skip_next_menu=true
+				fi
+			else
+				output="$(cat /tmp/minui-list-state)"
+				selected_index="$(echo "$output" | jq -r '.selected')"
+				selection="$(echo "$output" | jq -r ".menu[$selected_index].name")"
+				if [ "$selection" = "Continue" ]; then
+					: # do nothing, just dismiss menu
+				elif [ "$selection" = "Exit" ]; then
+					echo "Exiting the game"
+					touch "/tmp/force-exit"
+					kill "$PROCESS_PID" 2>/dev/null || true
+				fi
+			fi
+		fi
+
+		sleep 0.02
+	done
+}
+
+main "$@"

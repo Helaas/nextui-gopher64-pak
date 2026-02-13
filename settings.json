@@ -1,0 +1,14 @@
+{
+    "settings": [
+        {
+            "name": "CPU Mode",
+            "options": ["ondemand", "performance"],
+            "features": {
+                "hide_confirm": true
+            }
+        },
+        {
+            "name": "Save settings for game"
+        }
+    ]
+}

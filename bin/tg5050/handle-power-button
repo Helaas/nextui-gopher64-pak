@@ -1,0 +1,112 @@
+#!/bin/sh
+BIN_DIR="$(dirname "$0")"
+PAK_DIR="$(dirname "$(dirname "$BIN_DIR")")"
+PAK_NAME="$(basename "$PAK_DIR")"
+PAK_NAME="${PAK_NAME%.*}"
+
+rm -f "$LOGS_PATH/$PAK_NAME.power-button.txt"
+exec >>"$LOGS_PATH/$PAK_NAME.power-button.txt"
+exec 2>&1
+
+echo "$0" "$@"
+cd "$PAK_DIR" || exit 1
+
+POWER_DEVICE="/dev/input/event1"
+BUTTON_CODE="code 116 (KEY_POWER)"
+
+show_message() {
+	message="$1"
+	seconds="$2"
+
+	if [ -z "$seconds" ]; then
+		seconds="forever"
+	fi
+
+	killall minui-presenter >/dev/null 2>&1 || true
+	echo "$message" 1>&2
+	if [ "$seconds" = "forever" ]; then
+		minui-presenter --message "$message" --timeout -1 &
+	else
+		minui-presenter --message "$message" --timeout "$seconds"
+	fi
+}
+
+execute_power_off() {
+	PROCESS_PID="$1"
+
+	if [ -f "/tmp/force-power-off" ]; then
+		return
+	fi
+
+	touch "/tmp/force-power-off"
+	sync
+
+	show_message "Powering off..." forever
+
+	kill -9 "$PROCESS_PID" 2>/dev/null || true
+}
+
+main() {
+	PROCESS_PID="$1"
+
+	just_pressed=false
+	is_pressed=false
+	pressed_at=""
+
+	value_unpressed="value 0"
+	value_pressed="value 1"
+	value_held="value 2"
+
+	evtest "$POWER_DEVICE" 2>/dev/null | while read -r line; do
+		if [ -f "/tmp/force-exit" ]; then
+			echo "Force exit requested, exiting"
+			break
+		fi
+
+		now="$(coreutils date +%s%N)"
+		now="${now%??????}"
+		force_power_off=false
+
+		if echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_pressed"; then
+			if [ "$is_pressed" = "false" ]; then
+				just_pressed=true
+				pressed_at="$now"
+			else
+				just_pressed=false
+			fi
+			is_pressed=true
+		elif echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_unpressed"; then
+			if [ "$is_pressed" = "true" ] && [ -n "$pressed_at" ]; then
+				time_since_power_pressed=$((now - pressed_at))
+				if [ "$time_since_power_pressed" -ge 1000 ]; then
+					force_power_off=true
+				fi
+			fi
+			just_pressed=false
+			is_pressed=false
+			pressed_at=""
+		elif echo "$line" | grep "$BUTTON_CODE" | grep -q "$value_held"; then
+			is_pressed=true
+			just_pressed=false
+			if [ -n "$pressed_at" ]; then
+				time_since_power_pressed=$((now - pressed_at))
+				if [ "$time_since_power_pressed" -ge 1000 ]; then
+					force_power_off=true
+				fi
+			fi
+		elif echo "$line" | grep -q -v "$BUTTON_CODE"; then
+			continue
+		fi
+
+		if [ "$force_power_off" = "true" ]; then
+			sleep 1
+			echo "Forcing a power off"
+			execute_power_off "$PROCESS_PID"
+			break
+		fi
+
+		sleep 0.02
+	done
+}
+
+main "$@"
