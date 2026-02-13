@@ -147,11 +147,31 @@ show_message() {
 	fi
 }
 
+sync_shared_saves_into_portable() {
+	if [ -z "$SHARED_SAVE_DIR" ] || [ -z "$GOPHER_SAVE_DIR" ]; then
+		return
+	fi
+
+	mkdir -p "$SHARED_SAVE_DIR" "$GOPHER_SAVE_DIR"
+	cp -f "$SHARED_SAVE_DIR"/* "$GOPHER_SAVE_DIR"/ 2>/dev/null || true
+}
+
+sync_portable_saves_into_shared() {
+	if [ -z "$SHARED_SAVE_DIR" ] || [ -z "$GOPHER_SAVE_DIR" ]; then
+		return
+	fi
+
+	mkdir -p "$SHARED_SAVE_DIR" "$GOPHER_SAVE_DIR"
+	cp -f "$GOPHER_SAVE_DIR"/* "$SHARED_SAVE_DIR"/ 2>/dev/null || true
+}
+
 cleanup() {
 	rm -f "/tmp/stay_awake"
 	rm -f "/tmp/gopher64.pid"
 	rm -f "/tmp/force-power-off" "/tmp/force-power-off-tracker" "/tmp/force-exit"
 	killall minui-presenter >/dev/null 2>&1 || true
+
+	sync_portable_saves_into_shared
 
 	if [ -f "$HOME/cpu_governor.txt" ] && [ -f "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" ]; then
 		governor="$(cat "$HOME/cpu_governor.txt")"
@@ -237,20 +257,19 @@ main() {
 	}
 	CONFIGEOF
 
-	# Symlink saves to shared userdata so MinUI can track them
+	# Filesystems like exFAT cannot create symlinks in pak folders,
+	# so mirror saves between shared userdata and portable_data instead.
 	SHARED_SAVE_DIR="$SHARED_USERDATA_PATH/$PAK_NAME"
-	mkdir -p "$SHARED_SAVE_DIR"
-	rm -rf "$GOPHER64_DIR/portable_data/data/saves"
-	ln -sf "$SHARED_SAVE_DIR" "$GOPHER64_DIR/portable_data/data/saves"
+	GOPHER_SAVE_DIR="$GOPHER64_DIR/portable_data/data/saves"
+	sync_shared_saves_into_portable
 
 	show_message "Loading..." forever
+	sleep 0.1
+	killall minui-presenter >/dev/null 2>&1 || true
 
 	gopher64 --fullscreen "$ROM_PATH" &
 	PROCESS_PID="$!"
 	echo "$PROCESS_PID" >"/tmp/gopher64.pid"
-
-	sleep 1
-	killall minui-presenter >/dev/null 2>&1 || true
 
 	while kill -0 "$PROCESS_PID" 2>/dev/null; do
 		sleep 1
