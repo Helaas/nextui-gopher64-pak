@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_NAME="gopher64-tg5050-builder"
 
+# Pinned gopher64 version — tested with our DRM display patches
+GOPHER64_COMMIT="efbeaeab888c25c752d1531149d20cdcbe50c7be"
+
 echo "=== Building gopher64 for tg5050 ==="
+echo "--- Commit: $GOPHER64_COMMIT ---"
 
 # Build the Docker image
 echo "--- Building Docker image ---"
@@ -14,17 +18,24 @@ docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
 echo "--- Building gopher64 binary ---"
 docker run --rm \
     -v "$SCRIPT_DIR/bin/tg5050:/output" \
+    -v "$SCRIPT_DIR/patches:/patches:ro" \
     "$IMAGE_NAME" \
     bash -c '
 set -e
 
-# Clone gopher64 with submodules (parallel-rdp)
-git clone --depth 1 --recurse-submodules --shallow-submodules \
-    https://github.com/gopher64/gopher64.git /build/gopher64
+# Clone gopher64 at pinned commit with submodules
+git clone https://github.com/gopher64/gopher64.git /build/gopher64
 cd /build/gopher64
+git checkout '"$GOPHER64_COMMIT"'
+git submodule update --init --recursive --depth 1
 
 # Add sdl-unix-console-build feature for DRM/KMS-only systems (no X11/Wayland)
 sed -i "s/features = \[\"build-from-source-static\"\]/features = [\"build-from-source-static\", \"sdl-unix-console-build\"]/" Cargo.toml
+
+# Apply all DRM display patches via mounted script
+bash /patches/apply_patches.sh
+
+echo "--- Patches applied ---"
 
 # Override .cargo/config.toml for cross-compilation
 mkdir -p .cargo
