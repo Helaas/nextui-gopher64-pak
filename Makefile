@@ -35,9 +35,29 @@ UTILITY_TARGETS := \
 
 PAK_CONTENT := launch.sh pak.json settings.json res data bin
 
-.PHONY: all build build-utils clean help
+DOCKER_IMAGE ?= gopher64-tg5050-builder
+DOCKER_SYSROOT := /opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc
+DOCKER_CC := clang --target=aarch64-unknown-linux-gnu --sysroot=$(DOCKER_SYSROOT) -fuse-ld=lld
+
+TEST_TARGETS := tests/drm_plane_scale_test tests/drm_gbm_plane_test tests/drm_setplane_noscale_test
+
+.PHONY: all build build-utils build-tests clean help
 
 all: $(ZIP_FILE)
+
+build-tests: $(TEST_TARGETS)
+
+tests/drm_plane_scale_test: tests/drm_plane_scale_test.c
+	docker run --rm -v "$(CURDIR)/tests:/tests" $(DOCKER_IMAGE) \
+		$(DOCKER_CC) -o /tests/drm_plane_scale_test /tests/drm_plane_scale_test.c -ldrm
+
+tests/drm_gbm_plane_test: tests/drm_gbm_plane_test.c
+	docker run --rm -v "$(CURDIR)/tests:/tests" $(DOCKER_IMAGE) \
+		$(DOCKER_CC) -o /tests/drm_gbm_plane_test /tests/drm_gbm_plane_test.c -ldrm -ldl
+
+tests/drm_setplane_noscale_test: tests/drm_setplane_noscale_test.c
+	docker run --rm -v "$(CURDIR)/tests:/tests" $(DOCKER_IMAGE) \
+		$(DOCKER_CC) -o /tests/drm_setplane_noscale_test /tests/drm_setplane_noscale_test.c -ldrm
 
 build: $(ZIP_FILE)
 

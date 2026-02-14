@@ -43,6 +43,7 @@
 | DRM primary plane scaling | PASS | 320x240 -> 1280x720 and 640x480 -> 1280x720 both work |
 | DRM overlay plane scaling | PASS | Same scaling works, plus centered 320x240 -> 960x720 |
 | DRM plane hw-scaled page flips | PASS | 63 fps (320x240 -> 1280x720), vsync-limited |
+| gopher64 DRM fallback scanout (`drmModeSetCrtc`) | PASS | Correct image in-game and with CPU test pattern when `G64_DRM_DISABLE_PLANE=1` |
 | `EGL_KHR_image_base` | PASS | |
 | `EGL_EXT_image_dma_buf_import` | PASS | |
 | `EGL_KHR_surfaceless_context` | PASS | |
@@ -57,6 +58,7 @@
 | `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` (headless) | **SEGFAULT** | Crashes inside libmali.so |
 | `VK_KHR_display` (all surface creation) | **BROKEN** | Cannot enumerate displays at all |
 | SDL3 KMSDRM Vulkan surface | **BROKEN** | Depends on VK_KHR_display |
+| gopher64 DRM plane scanout (`drmModeSetPlane`) | **CORRUPT** | Corruption reproduces even with CPU test pattern (`G64_DRM_TEST_PATTERN=1`) on both primary and overlay plane paths |
 | `VK_KHR_push_descriptor` | N/A | Not available |
 | `VK_EXT_external_memory_host` | N/A | Not available |
 
@@ -67,6 +69,16 @@ The Mali driver advertises `VK_KHR_display` but the implementation segfaults on 
 gopher64 -> parallel-rdp WSI -> `SDL_Vulkan_CreateSurface()` -> SDL3 KMSDRM Vulkan -> `vkGetPhysicalDeviceDisplayPropertiesKHR()` -> **SEGFAULT in libmali.so**
 
 SDL3's KMSDRM Vulkan backend has exactly one code path: enumerate displays via `VK_KHR_display`, match against the DRM connector, then call `vkCreateDisplayPlaneSurfaceKHR`. Since display enumeration crashes, there is no workaround within SDL3's existing KMSDRM Vulkan code.
+
+---
+
+## Current Integration Status (2026-02-14)
+
+- **Confirmed**: corruption is isolated to the `drmModeSetPlane` path inside gopher64 integration.
+- **Evidence**: with only `.drm-test-pattern` enabled (no Vulkan frame content), image is still corrupted while logs report matching source/destination byte stride (`src_stride=2560`, `dst_stride=2560` for 640x240).
+- **Confirmed workaround**: forcing `drmModeSetCrtc` (disable plane path) produces a correct image.
+- **Tradeoff**: `drmModeSetCrtc` path is much slower on tg5050 (low framerate + audio underruns/choppiness), consistent with earlier throughput tests (~26 fps at full 1280x720 CPU-filled scanout).
+- **Current launcher policy**: default to safe path (`DRM_DISABLE_PLANE=1`), with explicit opt-in marker for experimental plane path (`.drm-enable-plane`).
 
 ---
 
@@ -174,10 +186,13 @@ Measured on-device with `drm_scanout_test` and `drm_plane_scale_test`:
 
 ## Recommendation
 
-**Approach 1: Vulkan render -> CPU readback -> DRM plane hw-scaled scanout.**
+**Short-term (current builds): use `drmModeSetCrtc` fallback for correctness.**
+
+**Long-term target: Approach 1 (`drmModeSetPlane` hw scaling) once integration corruption is resolved.**
 
 **Rationale**:
-- **Every component is confirmed working** on this device by three separate test programs
+- **Standalone validation remains strong** (all core DRM/GPU test programs pass)
+- **Current in-emulator reality differs**: `drmModeSetPlane` integration is still corrupted, so the fast path is not yet shippable
 - **63 fps proven** with hw-scaled dumb buffer flips — saturates the 60Hz vsync
 - **307KB/frame readback** at 60fps = 18 MB/s, negligible vs SoC memory bandwidth
 - **No DMA-BUF export needed** — avoids risking more Mali driver bugs

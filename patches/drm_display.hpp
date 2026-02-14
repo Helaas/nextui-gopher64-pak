@@ -60,6 +60,7 @@ struct DrmDisplay
 	bool setcrtc_error_logged = false;
 	bool plane_is_overlay = false;
 	bool vblank_error_logged = false;
+	bool fast_upscale_logged = false;
 };
 
 // Initialize DRM: open device, find connector/CRTC/plane, set mode.

@@ -2,8 +2,12 @@
  * DRM display backend for tg5050
  *
  * Opens /dev/dri/card0, finds the first connected connector,
- * allocates double-buffered dumb buffers at source resolution,
- * and uses drmModeSetPlane with hardware scaling to fill 1280x720.
+ * allocates double-buffered dumb buffers at display resolution,
+ * CPU-upscales from source resolution, and uses drmModePageFlip
+ * for vsync-paced buffer swaps.
+ *
+ * The Allwinner DE3.3 hw scaler (drmModeSetPlane with src != dst)
+ * corrupts non-uniform patterns. SetPlane/PageFlip at 1:1 are clean.
  */
 
 #include "drm_display.hpp"
@@ -12,6 +16,7 @@
 #include <cstring>
 #include <cerrno>
 #include <cstdlib>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -385,9 +390,10 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 		return false;
 	}
 
-	// Allocate buffers on first present or if resolution changed
-	const uint32_t alloc_width = d.debug_disable_plane ? d.display_width : width;
-	const uint32_t alloc_height = d.debug_disable_plane ? d.display_height : height;
+	// Always allocate at display resolution.  The Allwinner DE3.3 hw scaler
+	// corrupts non-uniform patterns, so we CPU-upscale and PageFlip at 1:1.
+	const uint32_t alloc_width = d.display_width;
+	const uint32_t alloc_height = d.display_height;
 
 	if (!d.buffers_ready || d.src_width != width || d.src_height != height)
 	{
@@ -448,19 +454,81 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 	{
 		// Copy scanout pixels into dumb buffer.
 		// Input is RGBA8888. FB is XRGB8888.
-		for (uint32_t y = 0; y < buf.height; y++)
+		const bool can_fast_integer_upscale =
+			width > 0 && height > 0 &&
+			(buf.width % width) == 0 &&
+			(buf.height % height) == 0;
+
+		if (can_fast_integer_upscale)
 		{
-			// If we're in SetCrtc debug mode, upsample source into display-sized FB.
-			uint32_t src_y = d.debug_disable_plane ? (y * height) / buf.height : y;
-			const uint8_t *src_row = rgba + src_y * stride;
-			uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
-			for (uint32_t x = 0; x < buf.width; x++)
+			const uint32_t scale_x = buf.width / width;
+			const uint32_t scale_y = buf.height / height;
+			if (scale_x > 0 && scale_y > 0 && scale_x <= 4 && scale_y <= 4)
 			{
-				uint32_t src_x = d.debug_disable_plane ? (x * width) / buf.width : x;
-				uint8_t r = src_row[src_x * 4 + 0];
-				uint8_t g = src_row[src_x * 4 + 1];
-				uint8_t b = src_row[src_x * 4 + 2];
-				dst_row[x] = (r << 16) | (g << 8) | b;
+				if (!d.fast_upscale_logged)
+				{
+					fprintf(stderr, "[drm_display] Using fast integer upscale: %ux%u -> %ux%u (%ux%u)\n",
+					        width, height, buf.width, buf.height, scale_x, scale_y);
+					d.fast_upscale_logged = true;
+				}
+
+				std::vector<uint32_t> expanded_row(buf.width);
+				const size_t row_bytes = static_cast<size_t>(buf.width) * sizeof(uint32_t);
+				for (uint32_t src_y = 0; src_y < height; src_y++)
+				{
+					const uint8_t *src_row = rgba + src_y * stride;
+					uint32_t *out = expanded_row.data();
+					for (uint32_t src_x = 0; src_x < width; src_x++)
+					{
+						const uint8_t *px = src_row + src_x * 4;
+						uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
+						for (uint32_t rx = 0; rx < scale_x; rx++)
+							*out++ = rgb;
+					}
+
+					uint32_t dst_base_y = src_y * scale_y;
+					for (uint32_t ry = 0; ry < scale_y; ry++)
+					{
+						uint8_t *dst = buf.map + (dst_base_y + ry) * buf.stride;
+						memcpy(dst, expanded_row.data(), row_bytes);
+					}
+				}
+			}
+			else
+			{
+				// Fallback for uncommon integer ratios where expanded loops are not worth specializing.
+				for (uint32_t y = 0; y < buf.height; y++)
+				{
+					uint32_t src_y = (y * height) / buf.height;
+					const uint8_t *src_row = rgba + src_y * stride;
+					uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
+					for (uint32_t x = 0; x < buf.width; x++)
+					{
+						uint32_t src_x = (x * width) / buf.width;
+						uint8_t r = src_row[src_x * 4 + 0];
+						uint8_t g = src_row[src_x * 4 + 1];
+						uint8_t b = src_row[src_x * 4 + 2];
+						dst_row[x] = (r << 16) | (g << 8) | b;
+					}
+				}
+			}
+		}
+		else
+		{
+			// Generic path: nearest-neighbor upscale for non-integer scale ratios.
+			for (uint32_t y = 0; y < buf.height; y++)
+			{
+				uint32_t src_y = (y * height) / buf.height;
+				const uint8_t *src_row = rgba + src_y * stride;
+				uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
+				for (uint32_t x = 0; x < buf.width; x++)
+				{
+					uint32_t src_x = (x * width) / buf.width;
+					uint8_t r = src_row[src_x * 4 + 0];
+					uint8_t g = src_row[src_x * 4 + 1];
+					uint8_t b = src_row[src_x * 4 + 2];
+					dst_row[x] = (r << 16) | (g << 8) | b;
+				}
 			}
 		}
 	}
@@ -501,30 +569,37 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 		drmModeDirtyFB(d.fd, buf.fb_id, nullptr, 0);
 	}
 
-	if (d.plane_id && !d.debug_disable_plane)
+	// The initial SetCrtc in drm_display_init() established the mode.
+	// For frame updates we use PageFlip: it queues a buffer swap at the
+	// next vblank without blocking, unlike SetCrtc which does a full modeset.
+	//
+	// On first frame we must use SetCrtc to associate our scanout buffer
+	// with the CRTC (PageFlip only works after a buffer has been displayed).
+	if (!d.mode_set)
 	{
-		// Use SetPlane with hardware scaling
-		// Source rect is in 16.16 fixed point
-		int err = drmModeSetPlane(d.fd, d.plane_id, d.crtc_id, buf.fb_id, 0,
-		                         0, 0, d.display_width, d.display_height,           // dst rect
-		                         0, 0, width << 16, height << 16);                   // src rect (16.16)
-		if (err < 0)
-		{
-			fprintf(stderr, "[drm_display] setPlane: %s\n", strerror(errno));
-			return false;
-		}
-		wait_vblank(d);
-	}
-	else
-	{
-		// Fallback: no hw scaling
 		int err = drmModeSetCrtc(d.fd, d.crtc_id, buf.fb_id, 0, 0,
 		                         &d.connector_id, 1, &d.mode_info);
 		if (err < 0)
 		{
+			fprintf(stderr, "[drm_display] initial setCrtc: %s\n", strerror(errno));
+			return false;
+		}
+		d.mode_set = true;
+	}
+	else
+	{
+		int err = drmModePageFlip(d.fd, d.crtc_id, buf.fb_id, 0, nullptr);
+		if (err < 0 && errno == EBUSY)
+		{
+			// Previous flip not yet completed — wait for vblank and retry.
+			wait_vblank(d);
+			err = drmModePageFlip(d.fd, d.crtc_id, buf.fb_id, 0, nullptr);
+		}
+		if (err < 0)
+		{
 			if (!d.setcrtc_error_logged)
 			{
-				fprintf(stderr, "[drm_display] setCrtc: %s\n", strerror(errno));
+				fprintf(stderr, "[drm_display] pageFlip: %s\n", strerror(errno));
 				d.setcrtc_error_logged = true;
 			}
 			return false;
