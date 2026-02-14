@@ -18,6 +18,7 @@
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm_fourcc.h>
 
 static bool create_dumb_buffer(int fd, DrmDisplay::DumbBuffer &buf, uint32_t width, uint32_t height)
 {
@@ -38,10 +39,28 @@ static bool create_dumb_buffer(int fd, DrmDisplay::DumbBuffer &buf, uint32_t wid
 	buf.width = width;
 	buf.height = height;
 
-	if (drmModeAddFB(fd, width, height, 24, 32, buf.stride, buf.handle, &buf.fb_id) < 0)
+	// Use AddFB2 with XBGR8888 format — same memory layout as RGBA [R,G,B,X]
+	// but ignores the alpha channel (critical: N64 scanout has varying alpha
+	// from fog/transparency which would make pixels semi-transparent against
+	// the base layer if we used ABGR8888).
+	// DRM_FORMAT_XBGR8888: uint32 LE = 0xXXBBGGRR, memory = [R, G, B, X]
+	uint32_t handles[4] = {buf.handle, 0, 0, 0};
+	uint32_t strides[4] = {buf.stride, 0, 0, 0};
+	uint32_t offsets[4] = {0, 0, 0, 0};
+	if (drmModeAddFB2(fd, width, height, DRM_FORMAT_XBGR8888, handles, strides, offsets, &buf.fb_id, 0) < 0)
 	{
-		fprintf(stderr, "[drm_display] addFB: %s\n", strerror(errno));
-		return false;
+		fprintf(stderr, "[drm_display] addFB2 XBGR8888: %s\n", strerror(errno));
+		// Fallback to XRGB8888 with per-pixel swizzle
+		if (drmModeAddFB2(fd, width, height, DRM_FORMAT_XRGB8888, handles, strides, offsets, &buf.fb_id, 0) < 0)
+		{
+			fprintf(stderr, "[drm_display] addFB2 XRGB8888 fallback: %s\n", strerror(errno));
+			return false;
+		}
+		buf.needs_swizzle = true;
+	}
+	else
+	{
+		buf.needs_swizzle = false;
 	}
 
 	struct drm_mode_map_dumb map_req = {};
@@ -249,32 +268,7 @@ found_crtc:
 		return false;
 	}
 
-	// Set mode on CRTC (we'll use SetPlane for actual display, but need mode set first)
-	// Create a tiny 8x8 dummy buffer to set the mode
-	DrmDisplay::DumbBuffer dummy = {};
-	if (!create_dumb_buffer(d.fd, dummy, 8, 8))
-	{
-		fprintf(stderr, "[drm_display] Failed to create dummy buffer for mode set\n");
-		drmModeFreeConnector(conn);
-		drmModeFreeResources(res);
-		return false;
-	}
-
-	// Clear to black
-	memset(dummy.map, 0, dummy.size);
-
-	int err = drmModeSetCrtc(d.fd, d.crtc_id, dummy.fb_id, 0, 0,
-	                         &d.connector_id, 1, mode);
-	if (err < 0)
-	{
-		fprintf(stderr, "[drm_display] setCrtc: %s\n", strerror(errno));
-		destroy_dumb_buffer(d.fd, dummy);
-		drmModeFreeConnector(conn);
-		drmModeFreeResources(res);
-		return false;
-	}
-
-	destroy_dumb_buffer(d.fd, dummy);
+	d.mode_info = *mode;
 
 	// Find primary plane for hw scaling
 	d.plane_id = find_primary_plane(d.fd, d.crtc_id);
@@ -283,6 +277,32 @@ found_crtc:
 		fprintf(stderr, "[drm_display] No primary plane found, falling back to SetCrtc\n");
 		// Not fatal - we'll use drmModeSetCrtc instead of SetPlane
 	}
+
+	// Set the CRTC mode with a proper display-sized buffer.
+	// This ensures the display pipeline is fully initialized.
+	if (!create_dumb_buffer(d.fd, d.mode_buf, d.display_width, d.display_height))
+	{
+		fprintf(stderr, "[drm_display] Failed to create mode-set buffer (%ux%u)\n",
+		        d.display_width, d.display_height);
+		drmModeFreeConnector(conn);
+		drmModeFreeResources(res);
+		return false;
+	}
+	memset(d.mode_buf.map, 0, d.mode_buf.size);
+
+	int err = drmModeSetCrtc(d.fd, d.crtc_id, d.mode_buf.fb_id, 0, 0,
+	                         &d.connector_id, 1, mode);
+	if (err < 0)
+	{
+		fprintf(stderr, "[drm_display] setCrtc: %s\n", strerror(errno));
+		// Non-fatal: mode might already be active
+	}
+	else
+	{
+		fprintf(stderr, "[drm_display] Mode set OK: %ux%u\n", d.display_width, d.display_height);
+	}
+
+	d.frame_count = 0;
 
 	fprintf(stderr, "[drm_display] Init OK: connector=%u crtc=%u plane=%u display=%ux%u\n",
 	        d.connector_id, d.crtc_id, d.plane_id, d.display_width, d.display_height);
@@ -315,27 +335,40 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 
 		d.buffers_ready = true;
 		d.current_buffer = 0;
-		fprintf(stderr, "[drm_display] Allocated %ux%u dumb buffers for hw-scaled scanout\n", width, height);
+		fprintf(stderr, "[drm_display] Allocated %ux%u dumb buffers (stride=%u) for hw-scaled scanout to %ux%u\n",
+		        width, height, d.buffers[0].stride, d.display_width, d.display_height);
 	}
 
 	DrmDisplay::DumbBuffer &buf = d.buffers[d.current_buffer];
 
-	// Copy pixels into dumb buffer.
-	// Source is RGBA8888, dumb buffer is XRGB8888.
-	// Both are 4 bytes per pixel but channel order differs.
-	// parallel-rdp scanout is typically RGBA8, DRM expects XRGB (BGRX in memory on LE).
-	// We need to swizzle: RGBA -> BGRA (XRGB8888 in DRM terms on little-endian)
-	for (uint32_t y = 0; y < height; y++)
+	// Copy scanout pixels into dumb buffer
+	if (buf.needs_swizzle)
 	{
-		const uint8_t *src_row = rgba + y * stride;
-		uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
-		for (uint32_t x = 0; x < width; x++)
+		// XRGB8888 fallback: per-pixel RGBA → XRGB conversion
+		for (uint32_t y = 0; y < height; y++)
 		{
-			uint8_t r = src_row[x * 4 + 0];
-			uint8_t g = src_row[x * 4 + 1];
-			uint8_t b = src_row[x * 4 + 2];
-			// XRGB8888: 0x00RRGGBB
-			dst_row[x] = (r << 16) | (g << 8) | b;
+			const uint8_t *src_row = rgba + y * stride;
+			uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
+			for (uint32_t x = 0; x < width; x++)
+			{
+				uint8_t r = src_row[x * 4 + 0];
+				uint8_t g = src_row[x * 4 + 1];
+				uint8_t b = src_row[x * 4 + 2];
+				dst_row[x] = (r << 16) | (g << 8) | b;
+			}
+		}
+	}
+	else
+	{
+		// XBGR8888: RGBA bytes match directly, use memcpy per row
+		if (stride == buf.stride)
+		{
+			memcpy(buf.map, rgba, height * stride);
+		}
+		else
+		{
+			for (uint32_t y = 0; y < height; y++)
+				memcpy(buf.map + y * buf.stride, rgba + y * stride, width * 4);
 		}
 	}
 
@@ -372,6 +405,7 @@ void drm_display_cleanup(DrmDisplay &d)
 {
 	for (int i = 0; i < 2; i++)
 		destroy_dumb_buffer(d.fd, d.buffers[i]);
+	destroy_dumb_buffer(d.fd, d.mode_buf);
 
 	if (d.fd >= 0)
 	{

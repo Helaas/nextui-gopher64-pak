@@ -267,7 +267,10 @@ main() {
 	sleep 0.1
 	killall minui-presenter >/dev/null 2>&1 || true
 
-	gopher64 --fullscreen "$ROM_PATH" &
+	# Use dummy video driver — our DRM display code handles scanout directly.
+	# SDL3's KMSDRM backend would fight us for the same DRM plane, causing corruption.
+	# Input (gamepad/evdev) still works with the dummy driver.
+	SDL_VIDEO_DRIVER=dummy gopher64 --fullscreen "$ROM_PATH" &
 	PROCESS_PID="$!"
 	echo "$PROCESS_PID" >"/tmp/gopher64.pid"
 

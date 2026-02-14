@@ -382,6 +382,13 @@ static void render_frame(Vulkan::Device &device)
 	if (width == 0 || height == 0 || scanout_pixels.empty())
 		return; // No frame to display
 
+	static bool logged_first_frame = false;
+	if (!logged_first_frame)
+	{
+		fprintf(stderr, "[rdp] First scanout: %ux%u, %zu pixels\n", width, height, scanout_pixels.size());
+		logged_first_frame = true;
+	}
+
 	// Present via DRM with hw scaling.
 	// scanout_pixels is RGBA8, stride = width * 4 bytes.
 	drm_display_present(drm_display,

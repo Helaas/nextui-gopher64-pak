@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <xf86drmMode.h>
 
 struct DrmDisplay
 {
@@ -22,6 +23,9 @@ struct DrmDisplay
 	uint32_t display_width = 0;
 	uint32_t display_height = 0;
 
+	// Saved mode for deferred mode setting
+	drmModeModeInfo mode_info = {};
+
 	// Double-buffered dumb buffers (allocated at source resolution)
 	struct DumbBuffer
 	{
@@ -32,10 +36,13 @@ struct DrmDisplay
 		uint32_t width = 0;
 		uint32_t height = 0;
 		uint8_t *map = nullptr;
+		bool needs_swizzle = false;
 	};
 
 	DumbBuffer buffers[2] = {};
+	DumbBuffer mode_buf = {};  // Display-sized buffer for CRTC mode set (kept alive)
 	int current_buffer = 0;
+	int frame_count = 0;
 
 	// Source resolution (set on first present)
 	uint32_t src_width = 0;
