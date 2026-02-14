@@ -267,10 +267,48 @@ main() {
 	sleep 0.1
 	killall minui-presenter >/dev/null 2>&1 || true
 
+	# Optional DRM debug toggles via marker files in pak root.
+	# touch .drm-test-pattern   -> bypass Vulkan scanout and draw CPU test pattern
+	# touch .drm-force-msync    -> force msync() after each dumb-buffer write
+	# touch .drm-enable-plane   -> opt in to drmModeSetPlane path (experimental)
+	# touch .drm-disable-plane  -> force drmModeSetCrtc path
+	# touch .drm-use-overlay    -> prefer overlay plane instead of primary (plane mode only)
+	# touch .drm-no-vblank-sync -> disable drmWaitVBlank pacing for plane updates
+	DRM_TEST_PATTERN=0
+	DRM_FORCE_MSYNC=0
+	# Default to SetCrtc path on tg5050 because SetPlane path shows corruption.
+	DRM_DISABLE_PLANE=1
+	DRM_USE_OVERLAY=0
+	DRM_NO_VBLANK_SYNC=0
+	if [ -f "$PAK_DIR/.drm-test-pattern" ]; then
+		DRM_TEST_PATTERN=1
+	fi
+	if [ -f "$PAK_DIR/.drm-force-msync" ]; then
+		DRM_FORCE_MSYNC=1
+	fi
+	if [ -f "$PAK_DIR/.drm-enable-plane" ]; then
+		DRM_DISABLE_PLANE=0
+	fi
+	if [ -f "$PAK_DIR/.drm-disable-plane" ]; then
+		DRM_DISABLE_PLANE=1
+	fi
+	if [ -f "$PAK_DIR/.drm-use-overlay" ]; then
+		DRM_USE_OVERLAY=1
+	fi
+	if [ -f "$PAK_DIR/.drm-no-vblank-sync" ]; then
+		DRM_NO_VBLANK_SYNC=1
+	fi
+
 	# Use dummy video driver — our DRM display code handles scanout directly.
 	# SDL3's KMSDRM backend would fight us for the same DRM plane, causing corruption.
 	# Input (gamepad/evdev) still works with the dummy driver.
-	SDL_VIDEO_DRIVER=dummy gopher64 --fullscreen "$ROM_PATH" &
+	SDL_VIDEODRIVER=dummy SDL_VIDEO_DRIVER=dummy \
+	G64_DRM_TEST_PATTERN="$DRM_TEST_PATTERN" \
+	G64_DRM_FORCE_MSYNC="$DRM_FORCE_MSYNC" \
+	G64_DRM_DISABLE_PLANE="$DRM_DISABLE_PLANE" \
+	G64_DRM_USE_OVERLAY="$DRM_USE_OVERLAY" \
+	G64_DRM_NO_VBLANK_SYNC="$DRM_NO_VBLANK_SYNC" \
+	gopher64 --fullscreen "$ROM_PATH" &
 	PROCESS_PID="$!"
 	echo "$PROCESS_PID" >"/tmp/gopher64.pid"
 

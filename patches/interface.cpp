@@ -110,6 +110,7 @@ static DrmDisplay drm_display;
 
 // CPU-side pixel buffer for scanout_sync readback
 static std::vector<RDP::RGBA> scanout_pixels;
+static_assert(sizeof(RDP::RGBA) == 4, "RDP::RGBA must be 4 bytes");
 
 #define MESSAGE_TIME 3000 // 3 seconds
 
@@ -382,10 +383,21 @@ static void render_frame(Vulkan::Device &device)
 	if (width == 0 || height == 0 || scanout_pixels.empty())
 		return; // No frame to display
 
+	const size_t expected_pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+	if (scanout_pixels.size() < expected_pixels)
+	{
+		fprintf(stderr, "[rdp] scanout_sync size mismatch: got %zu, expected at least %zu (%ux%u)\n",
+		        scanout_pixels.size(), expected_pixels, width, height);
+		return;
+	}
+
+	const uint32_t src_stride = width * sizeof(RDP::RGBA);
+
 	static bool logged_first_frame = false;
 	if (!logged_first_frame)
 	{
-		fprintf(stderr, "[rdp] First scanout: %ux%u, %zu pixels\n", width, height, scanout_pixels.size());
+		fprintf(stderr, "[rdp] First scanout: %ux%u, %zu pixels, src_stride=%u\n",
+		        width, height, scanout_pixels.size(), src_stride);
 		logged_first_frame = true;
 	}
 
@@ -393,7 +405,7 @@ static void render_frame(Vulkan::Device &device)
 	// scanout_pixels is RGBA8, stride = width * 4 bytes.
 	drm_display_present(drm_display,
 	                    reinterpret_cast<const uint8_t *>(scanout_pixels.data()),
-	                    width, height, width * 4);
+	                    width, height, src_stride);
 }
 
 void rdp_set_vi_register(uint32_t reg, uint32_t value)

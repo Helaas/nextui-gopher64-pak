@@ -36,7 +36,7 @@ struct DrmDisplay
 		uint32_t width = 0;
 		uint32_t height = 0;
 		uint8_t *map = nullptr;
-		bool needs_swizzle = false;
+		bool legacy_addfb = false;
 	};
 
 	DumbBuffer buffers[2] = {};
@@ -49,6 +49,17 @@ struct DrmDisplay
 	uint32_t src_height = 0;
 	bool buffers_ready = false;
 	bool mode_set = false;
+	bool dirtyfb_checked = false;
+	bool dirtyfb_supported = false;
+	bool debug_flags_initialized = false;
+	bool debug_test_pattern = false;
+	bool debug_force_msync = false;
+	bool debug_disable_plane = false;
+	bool debug_use_overlay = false;
+	bool debug_no_vblank_sync = false;
+	bool setcrtc_error_logged = false;
+	bool plane_is_overlay = false;
+	bool vblank_error_logged = false;
 };
 
 // Initialize DRM: open device, find connector/CRTC/plane, set mode.

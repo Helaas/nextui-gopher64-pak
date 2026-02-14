@@ -3,6 +3,7 @@ bin/.DS_Store
 
 .build/
 pak.zip
+.cache/
 
 # Downloaded helper binaries
 bin/arm64/

@@ -16,29 +16,46 @@ cp /patches/interface.cpp parallel-rdp/interface.cpp
 cp /patches/drm_display.hpp parallel-rdp/drm_display.hpp
 cp /patches/drm_display.cpp parallel-rdp/drm_display.cpp
 
-# Patch build.rs: add drm_display.cpp, DRM include path, link libdrm
+# Ensure sdl-unix-console-build feature is enabled (idempotent)
 python3 << 'PYEOF'
-import re
+with open('Cargo.toml', 'r') as f:
+    content = f.read()
 
+needle = 'features = ["build-from-source-static"]'
+replace = 'features = ["build-from-source-static", "sdl-unix-console-build"]'
+
+if needle in content:
+    content = content.replace(needle, replace, 1)
+
+with open('Cargo.toml', 'w') as f:
+    f.write(content)
+print('Patched Cargo.toml: ensured sdl-unix-console-build feature')
+PYEOF
+
+# Patch build.rs: add drm_display.cpp, DRM include path, link libdrm (idempotent)
+python3 << 'PYEOF'
 with open('build.rs', 'r') as f:
     content = f.read()
 
-# Add drm_display.cpp after wsi_platform.cpp
-content = content.replace(
+def insert_after_once(text: str, anchor: str, line: str) -> str:
+    if line in text:
+        return text
+    return text.replace(anchor, anchor + "\n" + line, 1)
+
+content = insert_after_once(
+    content,
     '.file("parallel-rdp/wsi_platform.cpp")',
-    '.file("parallel-rdp/wsi_platform.cpp")\n        .file("parallel-rdp/drm_display.cpp")'
+    '        .file("parallel-rdp/drm_display.cpp")'
 )
-
-# Add DRM include path after parallel-rdp-standalone/util include
-content = content.replace(
+content = insert_after_once(
+    content,
     '.include("parallel-rdp/parallel-rdp-standalone/util")',
-    '.include("parallel-rdp/parallel-rdp-standalone/util")\n        .include("/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/include/libdrm")'
+    '        .include("/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/include/libdrm")'
 )
-
-# Add libdrm link directive after rdp_build.compile
-content = content.replace(
+content = insert_after_once(
+    content,
     'rdp_build.compile("parallel-rdp");',
-    'rdp_build.compile("parallel-rdp");\n    println!("cargo:rustc-link-lib=drm");'
+    '    println!("cargo:rustc-link-lib=drm");'
 )
 
 with open('build.rs', 'w') as f:
@@ -46,15 +63,15 @@ with open('build.rs', 'w') as f:
 print('Patched build.rs: added drm_display.cpp, DRM includes, libdrm link')
 PYEOF
 
-# Patch video.rs: remove SDL_WINDOW_VULKAN flag
+# Patch video.rs: remove SDL_WINDOW_VULKAN flag (idempotent)
 python3 << 'PYEOF'
 import re
 
 with open('src/ui/video.rs', 'r') as f:
     content = f.read()
 
-# Remove SDL_WINDOW_VULKAN and the following | on the next line
-content = re.sub(r'sdl3_sys::video::SDL_WINDOW_VULKAN\s*\|\s*', '', content, count=1)
+# Remove SDL_WINDOW_VULKAN and trailing "|" in all occurrences
+content = re.sub(r'sdl3_sys::video::SDL_WINDOW_VULKAN\s*\|\s*', '', content)
 
 with open('src/ui/video.rs', 'w') as f:
     f.write(content)
