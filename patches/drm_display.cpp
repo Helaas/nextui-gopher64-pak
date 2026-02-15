@@ -22,6 +22,10 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
+
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
@@ -472,18 +476,142 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 					d.fast_upscale_logged = true;
 				}
 
-				std::vector<uint32_t> expanded_row(buf.width);
+				// Persistent row buffer — avoids per-frame heap allocation.
+				static thread_local std::vector<uint32_t> expanded_row;
+				if (expanded_row.size() < buf.width)
+					expanded_row.resize(buf.width);
 				const size_t row_bytes = static_cast<size_t>(buf.width) * sizeof(uint32_t);
+
 				for (uint32_t src_y = 0; src_y < height; src_y++)
 				{
 					const uint8_t *src_row = rgba + src_y * stride;
 					uint32_t *out = expanded_row.data();
-					for (uint32_t src_x = 0; src_x < width; src_x++)
+
+#ifdef __aarch64__
+					if (scale_x == 2)
 					{
-						const uint8_t *px = src_row + src_x * 4;
-						uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-						for (uint32_t rx = 0; rx < scale_x; rx++)
+						// NEON fast path: 8 RGBA pixels → 16 XRGB pixels per iteration.
+						uint32_t src_x = 0;
+						const uint32_t neon_width = width & ~7u; // round down to multiple of 8
+						for (; src_x < neon_width; src_x += 8)
+						{
+							// Deinterleaved load: r[0..7], g[0..7], b[0..7], a[0..7]
+							uint8x8x4_t px = vld4_u8(src_row + src_x * 4);
+							uint8x8_t r = px.val[0];
+							uint8x8_t g = px.val[1];
+							uint8x8_t b = px.val[2];
+							uint8x8_t zero = vdup_n_u8(0);
+
+							// Pack as XRGB8888 (little-endian: B, G, R, 0x00)
+							uint8x8x4_t xrgb;
+							xrgb.val[0] = b;
+							xrgb.val[1] = g;
+							xrgb.val[2] = r;
+							xrgb.val[3] = zero;
+
+							// Duplicate each pixel 2x using zip (interleave with self).
+							// zip gives us pairs: [p0,p0, p1,p1, p2,p2, p3,p3] for lo half,
+							// and [p4,p4, p5,p5, p6,p6, p7,p7] for hi half.
+							// We need to zip each channel independently, then store interleaved.
+
+							uint8x8x2_t b_dup = vzip_u8(xrgb.val[0], xrgb.val[0]);
+							uint8x8x2_t g_dup = vzip_u8(xrgb.val[1], xrgb.val[1]);
+							uint8x8x2_t r_dup = vzip_u8(xrgb.val[2], xrgb.val[2]);
+							uint8x8x2_t a_dup = vzip_u8(xrgb.val[3], xrgb.val[3]);
+
+							// Store first 8 output pixels (src pixels 0-3 doubled)
+							uint8x8x4_t out_lo;
+							out_lo.val[0] = b_dup.val[0];
+							out_lo.val[1] = g_dup.val[0];
+							out_lo.val[2] = r_dup.val[0];
+							out_lo.val[3] = a_dup.val[0];
+							vst4_u8(reinterpret_cast<uint8_t *>(out), out_lo);
+
+							// Store next 8 output pixels (src pixels 4-7 doubled)
+							uint8x8x4_t out_hi;
+							out_hi.val[0] = b_dup.val[1];
+							out_hi.val[1] = g_dup.val[1];
+							out_hi.val[2] = r_dup.val[1];
+							out_hi.val[3] = a_dup.val[1];
+							vst4_u8(reinterpret_cast<uint8_t *>(out + 8), out_hi);
+
+							out += 16;
+						}
+						// Scalar tail for remaining pixels
+						for (; src_x < width; src_x++)
+						{
+							const uint8_t *px = src_row + src_x * 4;
+							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
 							*out++ = rgb;
+							*out++ = rgb;
+						}
+					}
+					else if (scale_x == 4)
+					{
+						// NEON fast path: 8 RGBA pixels → 32 XRGB pixels per iteration.
+						uint32_t src_x = 0;
+						const uint32_t neon_width = width & ~7u;
+						for (; src_x < neon_width; src_x += 8)
+						{
+							uint8x8x4_t px = vld4_u8(src_row + src_x * 4);
+							uint8x8_t r = px.val[0];
+							uint8x8_t g = px.val[1];
+							uint8x8_t b = px.val[2];
+							uint8x8_t zero = vdup_n_u8(0);
+
+							// First zip: 1→2 duplication
+							uint8x8x2_t b2 = vzip_u8(b, b);
+							uint8x8x2_t g2 = vzip_u8(g, g);
+							uint8x8x2_t r2 = vzip_u8(r, r);
+							uint8x8x2_t z2 = vzip_u8(zero, zero);
+
+							// Second zip: 2→4 duplication
+							// lo half (src pixels 0-3, each 2x) → zip again for 4x
+							uint8x8x2_t b4_lo = vzip_u8(b2.val[0], b2.val[0]);
+							uint8x8x2_t g4_lo = vzip_u8(g2.val[0], g2.val[0]);
+							uint8x8x2_t r4_lo = vzip_u8(r2.val[0], r2.val[0]);
+							uint8x8x2_t z4_lo = vzip_u8(z2.val[0], z2.val[0]);
+
+							// Pixels 0-1 (each 4x) = 8 output pixels
+							uint8x8x4_t blk0 = { { b4_lo.val[0], g4_lo.val[0], r4_lo.val[0], z4_lo.val[0] } };
+							vst4_u8(reinterpret_cast<uint8_t *>(out), blk0);
+							// Pixels 2-3 (each 4x)
+							uint8x8x4_t blk1 = { { b4_lo.val[1], g4_lo.val[1], r4_lo.val[1], z4_lo.val[1] } };
+							vst4_u8(reinterpret_cast<uint8_t *>(out + 8), blk1);
+
+							// hi half (src pixels 4-7, each 2x) → zip again for 4x
+							uint8x8x2_t b4_hi = vzip_u8(b2.val[1], b2.val[1]);
+							uint8x8x2_t g4_hi = vzip_u8(g2.val[1], g2.val[1]);
+							uint8x8x2_t r4_hi = vzip_u8(r2.val[1], r2.val[1]);
+							uint8x8x2_t z4_hi = vzip_u8(z2.val[1], z2.val[1]);
+
+							// Pixels 4-5 (each 4x)
+							uint8x8x4_t blk2 = { { b4_hi.val[0], g4_hi.val[0], r4_hi.val[0], z4_hi.val[0] } };
+							vst4_u8(reinterpret_cast<uint8_t *>(out + 16), blk2);
+							// Pixels 6-7 (each 4x)
+							uint8x8x4_t blk3 = { { b4_hi.val[1], g4_hi.val[1], r4_hi.val[1], z4_hi.val[1] } };
+							vst4_u8(reinterpret_cast<uint8_t *>(out + 24), blk3);
+
+							out += 32;
+						}
+						for (; src_x < width; src_x++)
+						{
+							const uint8_t *px = src_row + src_x * 4;
+							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
+							*out++ = rgb; *out++ = rgb; *out++ = rgb; *out++ = rgb;
+						}
+					}
+					else
+#endif // __aarch64__
+					{
+						// Scalar path for non-2x scales or non-aarch64.
+						for (uint32_t src_x = 0; src_x < width; src_x++)
+						{
+							const uint8_t *px = src_row + src_x * 4;
+							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
+							for (uint32_t rx = 0; rx < scale_x; rx++)
+								*out++ = rgb;
+						}
 					}
 
 					uint32_t dst_base_y = src_y * scale_y;
