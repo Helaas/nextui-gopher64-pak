@@ -61,6 +61,7 @@ struct DrmDisplay
 	bool plane_is_overlay = false;
 	bool vblank_error_logged = false;
 	bool fast_upscale_logged = false;
+	bool blit_path_logged = false;
 };
 
 // Initialize DRM: open device, find connector/CRTC/plane, set mode.
@@ -71,6 +72,10 @@ bool drm_display_init(DrmDisplay &d);
 // issues a plane flip with hardware scaling to display resolution.
 // First call allocates buffers sized to (width x height).
 bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t stride);
+
+// Flip an externally-managed framebuffer (e.g. Vulkan DMA-buf).
+// Handles initial SetCrtc vs subsequent PageFlip automatically.
+bool drm_display_flip(DrmDisplay &d, uint32_t fb_id);
 
 // Tear down: release buffers, restore CRTC, close fd.
 void drm_display_cleanup(DrmDisplay &d);

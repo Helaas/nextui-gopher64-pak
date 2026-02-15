@@ -25,7 +25,7 @@ export ROM_NAME="$(basename -- "$*")"
 export GAMESETTINGS_DIR="$USERDATA_PATH/$PAK_NAME/game-settings/$ROM_NAME"
 
 get_cpu_mode() {
-	cpu_mode="ondemand"
+	cpu_mode="performance"
 	if [ -f "$GAMESETTINGS_DIR/cpu-mode" ]; then
 		cpu_mode="$(cat "$GAMESETTINGS_DIR/cpu-mode")"
 	fi
@@ -118,15 +118,57 @@ configure_cpu() {
 	cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor >"$HOME/cpu_governor.txt"
 	cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq >"$HOME/cpu_min_freq.txt"
 	cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq >"$HOME/cpu_max_freq.txt"
+	if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_governor ]; then
+		cat /sys/devices/system/cpu/cpufreq/policy4/scaling_governor >"$HOME/cpu_policy4_governor.txt"
+	fi
+	if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq ]; then
+		cat /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq >"$HOME/cpu_policy4_min_freq.txt"
+	fi
+	if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq ]; then
+		cat /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq >"$HOME/cpu_policy4_max_freq.txt"
+	fi
+	for cpu in 5 6 7; do
+		if [ -f "/sys/devices/system/cpu/cpu${cpu}/online" ]; then
+			cat "/sys/devices/system/cpu/cpu${cpu}/online" >"$HOME/cpu${cpu}_online.txt"
+		fi
+	done
 
 	if [ "$cpu_mode" = "performance" ]; then
 		echo performance >/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 		echo 1200000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
-		echo 2160000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+		echo 1416000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+
+		# Bring additional performance cores online when available.
+		for cpu in 5 6 7; do
+			if [ -f "/sys/devices/system/cpu/cpu${cpu}/online" ]; then
+				echo 1 >"/sys/devices/system/cpu/cpu${cpu}/online" || true
+			fi
+		done
+
+		# Tune high-performance policy (cpu4 cluster) if present.
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_governor ]; then
+			echo performance >/sys/devices/system/cpu/cpufreq/policy4/scaling_governor
+		fi
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq ]; then
+			echo 2160000 >/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
+		fi
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq ]; then
+			echo 2160000 >/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
+		fi
 	else
 		echo ondemand >/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 		echo 408000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
-		echo 2160000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+		echo 1416000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_governor ]; then
+			echo ondemand >/sys/devices/system/cpu/cpufreq/policy4/scaling_governor
+		fi
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq ]; then
+			echo 408000 >/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
+		fi
+		if [ -f /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq ]; then
+			echo 2160000 >/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
+		fi
 	fi
 }
 
@@ -144,6 +186,32 @@ show_message() {
 		minui-presenter --message "$message" --timeout -1 &
 	else
 		minui-presenter --message "$message" --timeout "$seconds"
+	fi
+}
+
+validate_gopher_binary() {
+	gopher_bin="$1"
+	min_size_bytes=10000000
+
+	if [ ! -x "$gopher_bin" ]; then
+		echo "[launch] Missing or non-executable binary: $gopher_bin"
+		show_message "gopher64 binary missing" 3
+		exit 1
+	fi
+
+	bin_size="$(ls -ln "$gopher_bin" 2>/dev/null | awk '{print $5}')"
+	case "$bin_size" in
+	'' | *[!0-9]*)
+		echo "[launch] Could not read binary size: $gopher_bin"
+		show_message "gopher64 binary invalid" 3
+		exit 1
+		;;
+	esac
+
+	if [ "$bin_size" -lt "$min_size_bytes" ]; then
+		echo "[launch] Binary looks truncated ($bin_size bytes): $gopher_bin"
+		show_message "gopher64 copy incomplete" 3
+		exit 1
 	fi
 }
 
@@ -188,6 +256,28 @@ cleanup() {
 		echo "$max_freq" >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 		rm -f "$HOME/cpu_max_freq.txt"
 	fi
+	if [ -f "$HOME/cpu_policy4_governor.txt" ] && [ -f "/sys/devices/system/cpu/cpufreq/policy4/scaling_governor" ]; then
+		governor4="$(cat "$HOME/cpu_policy4_governor.txt")"
+		echo "$governor4" >/sys/devices/system/cpu/cpufreq/policy4/scaling_governor
+		rm -f "$HOME/cpu_policy4_governor.txt"
+	fi
+	if [ -f "$HOME/cpu_policy4_min_freq.txt" ] && [ -f "/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq" ]; then
+		min_freq4="$(cat "$HOME/cpu_policy4_min_freq.txt")"
+		echo "$min_freq4" >/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq
+		rm -f "$HOME/cpu_policy4_min_freq.txt"
+	fi
+	if [ -f "$HOME/cpu_policy4_max_freq.txt" ] && [ -f "/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq" ]; then
+		max_freq4="$(cat "$HOME/cpu_policy4_max_freq.txt")"
+		echo "$max_freq4" >/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
+		rm -f "$HOME/cpu_policy4_max_freq.txt"
+	fi
+	for cpu in 5 6 7; do
+		if [ -f "$HOME/cpu${cpu}_online.txt" ] && [ -f "/sys/devices/system/cpu/cpu${cpu}/online" ]; then
+			online_value="$(cat "$HOME/cpu${cpu}_online.txt")"
+			echo "$online_value" >"/sys/devices/system/cpu/cpu${cpu}/online" || true
+			rm -f "$HOME/cpu${cpu}_online.txt"
+		fi
+	done
 
 	if [ -f "$TEMP_ROM" ]; then
 		rm -f "$TEMP_ROM"
@@ -223,6 +313,7 @@ main() {
 
 	# Set up gopher64 in portable mode
 	GOPHER64_DIR="$PAK_DIR/bin/$PLATFORM"
+	validate_gopher_binary "$GOPHER64_DIR/gopher64"
 	touch "$GOPHER64_DIR/portable.txt"
 	mkdir -p "$GOPHER64_DIR/portable_data/config"
 	mkdir -p "$GOPHER64_DIR/portable_data/data/saves"
@@ -274,12 +365,18 @@ main() {
 	# touch .drm-disable-plane  -> force drmModeSetCrtc path
 	# touch .drm-use-overlay    -> prefer overlay plane instead of primary (plane mode only)
 	# touch .drm-no-vblank-sync -> disable drmWaitVBlank pacing for plane updates
+	# touch .g64-disable-speed-limiter -> disable gopher64 VI speed limiter
+	# touch .g64-force-limit-freq1     -> keep limiter enabled but force limit_freq=1
+	# touch .g64-pin-big-core          -> pin threads to CPU4-CPU7 (performance cluster)
 	DRM_TEST_PATTERN=0
 	DRM_FORCE_MSYNC=0
 	# Default to SetCrtc path on tg5050 because SetPlane path shows corruption.
 	DRM_DISABLE_PLANE=1
 	DRM_USE_OVERLAY=0
 	DRM_NO_VBLANK_SYNC=0
+	G64_DISABLE_SPEED_LIMITER=0
+	G64_FORCE_LIMIT_FREQ1=0
+	G64_PIN_BIG_CORE=0
 	if [ -f "$PAK_DIR/.drm-test-pattern" ]; then
 		DRM_TEST_PATTERN=1
 	fi
@@ -298,6 +395,15 @@ main() {
 	if [ -f "$PAK_DIR/.drm-no-vblank-sync" ]; then
 		DRM_NO_VBLANK_SYNC=1
 	fi
+	if [ -f "$PAK_DIR/.g64-disable-speed-limiter" ]; then
+		G64_DISABLE_SPEED_LIMITER=1
+	fi
+	if [ -f "$PAK_DIR/.g64-force-limit-freq1" ]; then
+		G64_FORCE_LIMIT_FREQ1=1
+	fi
+	if [ -f "$PAK_DIR/.g64-pin-big-core" ]; then
+		G64_PIN_BIG_CORE=1
+	fi
 
 	# Use dummy video driver — our DRM display code handles scanout directly.
 	# SDL3's KMSDRM backend would fight us for the same DRM plane, causing corruption.
@@ -308,6 +414,9 @@ main() {
 	G64_DRM_DISABLE_PLANE="$DRM_DISABLE_PLANE" \
 	G64_DRM_USE_OVERLAY="$DRM_USE_OVERLAY" \
 	G64_DRM_NO_VBLANK_SYNC="$DRM_NO_VBLANK_SYNC" \
+	G64_DISABLE_SPEED_LIMITER="$G64_DISABLE_SPEED_LIMITER" \
+	G64_FORCE_LIMIT_FREQ1="$G64_FORCE_LIMIT_FREQ1" \
+	G64_PIN_BIG_CORE="$G64_PIN_BIG_CORE" \
 	gopher64 --fullscreen "$ROM_PATH" &
 	PROCESS_PID="$!"
 	echo "$PROCESS_PID" >"/tmp/gopher64.pid"
