@@ -25,7 +25,7 @@ export ROM_NAME="$(basename -- "$*")"
 export GAMESETTINGS_DIR="$USERDATA_PATH/$PAK_NAME/game-settings/$ROM_NAME"
 
 get_cpu_mode() {
-	cpu_mode="ondemand"
+	cpu_mode="performance"
 	if [ -f "$GAMESETTINGS_DIR/cpu-mode" ]; then
 		cpu_mode="$(cat "$GAMESETTINGS_DIR/cpu-mode")"
 	fi
@@ -147,6 +147,32 @@ show_message() {
 	fi
 }
 
+validate_gopher_binary() {
+	gopher_bin="$1"
+	min_size_bytes=10000000
+
+	if [ ! -x "$gopher_bin" ]; then
+		echo "[launch] Missing or non-executable binary: $gopher_bin"
+		show_message "gopher64 binary missing" 3
+		exit 1
+	fi
+
+	bin_size="$(ls -ln "$gopher_bin" 2>/dev/null | awk '{print $5}')"
+	case "$bin_size" in
+	'' | *[!0-9]*)
+		echo "[launch] Could not read binary size: $gopher_bin"
+		show_message "gopher64 binary invalid" 3
+		exit 1
+		;;
+	esac
+
+	if [ "$bin_size" -lt "$min_size_bytes" ]; then
+		echo "[launch] Binary looks truncated ($bin_size bytes): $gopher_bin"
+		show_message "gopher64 copy incomplete" 3
+		exit 1
+	fi
+}
+
 sync_shared_saves_into_portable() {
 	if [ -z "$SHARED_SAVE_DIR" ] || [ -z "$GOPHER_SAVE_DIR" ]; then
 		return
@@ -223,6 +249,7 @@ main() {
 
 	# Set up gopher64 in portable mode
 	GOPHER64_DIR="$PAK_DIR/bin/$PLATFORM"
+	validate_gopher_binary "$GOPHER64_DIR/gopher64"
 	touch "$GOPHER64_DIR/portable.txt"
 	mkdir -p "$GOPHER64_DIR/portable_data/config"
 	mkdir -p "$GOPHER64_DIR/portable_data/data/saves"

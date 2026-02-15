@@ -382,6 +382,129 @@ found_crtc:
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// NEON helpers for RGBA→XRGB row conversion (write directly to destination)
+// ---------------------------------------------------------------------------
+
+#ifdef __aarch64__
+
+// 1:1 format conversion — no scaling. 8 pixels per iteration.
+static void neon_row_rgba_to_xrgb_1to1(const uint8_t *src, uint8_t *dst, uint32_t pixel_count)
+{
+	uint32_t x = 0;
+	const uint32_t neon_end = pixel_count & ~7u;
+	for (; x < neon_end; x += 8)
+	{
+		uint8x8x4_t px = vld4_u8(src + x * 4);
+		uint8x8x4_t out;
+		out.val[0] = px.val[2]; // B
+		out.val[1] = px.val[1]; // G
+		out.val[2] = px.val[0]; // R
+		out.val[3] = vdup_n_u8(0);
+		vst4_u8(dst + x * 4, out);
+	}
+	for (; x < pixel_count; x++)
+	{
+		const uint8_t *p = src + x * 4;
+		reinterpret_cast<uint32_t *>(dst)[x] =
+			(uint32_t(p[0]) << 16) | (uint32_t(p[1]) << 8) | uint32_t(p[2]);
+	}
+}
+
+// 2x horizontal expand + format conversion. Writes width*2 pixels.
+static void neon_row_rgba_to_xrgb_2x(const uint8_t *src, uint8_t *dst, uint32_t src_width)
+{
+	uint32_t *out = reinterpret_cast<uint32_t *>(dst);
+	uint32_t src_x = 0;
+	const uint32_t neon_end = src_width & ~7u;
+	for (; src_x < neon_end; src_x += 8)
+	{
+		uint8x8x4_t px = vld4_u8(src + src_x * 4);
+		uint8x8_t zero = vdup_n_u8(0);
+
+		uint8x8x2_t b_dup = vzip_u8(px.val[2], px.val[2]);
+		uint8x8x2_t g_dup = vzip_u8(px.val[1], px.val[1]);
+		uint8x8x2_t r_dup = vzip_u8(px.val[0], px.val[0]);
+		uint8x8x2_t a_dup = vzip_u8(zero, zero);
+
+		uint8x8x4_t lo = { { b_dup.val[0], g_dup.val[0], r_dup.val[0], a_dup.val[0] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out), lo);
+		uint8x8x4_t hi = { { b_dup.val[1], g_dup.val[1], r_dup.val[1], a_dup.val[1] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out + 8), hi);
+		out += 16;
+	}
+	for (; src_x < src_width; src_x++)
+	{
+		const uint8_t *p = src + src_x * 4;
+		uint32_t rgb = (uint32_t(p[0]) << 16) | (uint32_t(p[1]) << 8) | uint32_t(p[2]);
+		*out++ = rgb;
+		*out++ = rgb;
+	}
+}
+
+// 4x horizontal expand + format conversion. Writes width*4 pixels.
+static void neon_row_rgba_to_xrgb_4x(const uint8_t *src, uint8_t *dst, uint32_t src_width)
+{
+	uint32_t *out = reinterpret_cast<uint32_t *>(dst);
+	uint32_t src_x = 0;
+	const uint32_t neon_end = src_width & ~7u;
+	for (; src_x < neon_end; src_x += 8)
+	{
+		uint8x8x4_t px = vld4_u8(src + src_x * 4);
+		uint8x8_t zero = vdup_n_u8(0);
+
+		uint8x8x2_t b2 = vzip_u8(px.val[2], px.val[2]);
+		uint8x8x2_t g2 = vzip_u8(px.val[1], px.val[1]);
+		uint8x8x2_t r2 = vzip_u8(px.val[0], px.val[0]);
+		uint8x8x2_t z2 = vzip_u8(zero, zero);
+
+		uint8x8x2_t b4_lo = vzip_u8(b2.val[0], b2.val[0]);
+		uint8x8x2_t g4_lo = vzip_u8(g2.val[0], g2.val[0]);
+		uint8x8x2_t r4_lo = vzip_u8(r2.val[0], r2.val[0]);
+		uint8x8x2_t z4_lo = vzip_u8(z2.val[0], z2.val[0]);
+
+		uint8x8x4_t blk0 = { { b4_lo.val[0], g4_lo.val[0], r4_lo.val[0], z4_lo.val[0] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out), blk0);
+		uint8x8x4_t blk1 = { { b4_lo.val[1], g4_lo.val[1], r4_lo.val[1], z4_lo.val[1] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out + 8), blk1);
+
+		uint8x8x2_t b4_hi = vzip_u8(b2.val[1], b2.val[1]);
+		uint8x8x2_t g4_hi = vzip_u8(g2.val[1], g2.val[1]);
+		uint8x8x2_t r4_hi = vzip_u8(r2.val[1], r2.val[1]);
+		uint8x8x2_t z4_hi = vzip_u8(z2.val[1], z2.val[1]);
+
+		uint8x8x4_t blk2 = { { b4_hi.val[0], g4_hi.val[0], r4_hi.val[0], z4_hi.val[0] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out + 16), blk2);
+		uint8x8x4_t blk3 = { { b4_hi.val[1], g4_hi.val[1], r4_hi.val[1], z4_hi.val[1] } };
+		vst4_u8(reinterpret_cast<uint8_t *>(out + 24), blk3);
+		out += 32;
+	}
+	for (; src_x < src_width; src_x++)
+	{
+		const uint8_t *p = src + src_x * 4;
+		uint32_t rgb = (uint32_t(p[0]) << 16) | (uint32_t(p[1]) << 8) | uint32_t(p[2]);
+		*out++ = rgb; *out++ = rgb; *out++ = rgb; *out++ = rgb;
+	}
+}
+
+#endif // __aarch64__
+
+// Scalar row conversion — format convert + optional nearest-neighbor horizontal scale.
+static void scalar_row_rgba_to_xrgb(const uint8_t *src, uint8_t *dst,
+                                     uint32_t src_width, uint32_t dst_width)
+{
+	uint32_t *out = reinterpret_cast<uint32_t *>(dst);
+	for (uint32_t x = 0; x < dst_width; x++)
+	{
+		uint32_t src_x = (x * src_width) / dst_width;
+		if (src_x >= src_width) src_x = src_width - 1;
+		const uint8_t *p = src + src_x * 4;
+		out[x] = (uint32_t(p[0]) << 16) | (uint32_t(p[1]) << 8) | uint32_t(p[2]);
+	}
+}
+
+// ---------------------------------------------------------------------------
+
 bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t stride)
 {
 	init_debug_flags(d);
@@ -457,207 +580,47 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 	else
 	{
 		// Copy scanout pixels into dumb buffer.
-		// Input is RGBA8888. FB is XRGB8888.
-		const bool can_fast_integer_upscale =
-			width > 0 && height > 0 &&
-			(buf.width % width) == 0 &&
-			(buf.height % height) == 0;
+		// Input is RGBA8888.  FB is XRGB8888.
+		//
+		// Unified per-axis blit: fixed-point vertical row selection handles
+		// upscale, downscale, or 1:1.  Horizontal dispatch picks the best
+		// NEON (or scalar) path for the detected ratio.
 
-		if (can_fast_integer_upscale)
+		const bool h_exact   = (width == buf.width);
+		const bool h_up_2x   = (!h_exact && width > 0 && buf.width == width * 2);
+		const bool h_up_4x   = (!h_exact && width > 0 && buf.width == width * 4);
+
+		if (!d.blit_path_logged)
 		{
-			const uint32_t scale_x = buf.width / width;
-			const uint32_t scale_y = buf.height / height;
-			if (scale_x > 0 && scale_y > 0 && scale_x <= 4 && scale_y <= 4)
-			{
-				if (!d.fast_upscale_logged)
-				{
-					fprintf(stderr, "[drm_display] Using fast integer upscale: %ux%u -> %ux%u (%ux%u)\n",
-					        width, height, buf.width, buf.height, scale_x, scale_y);
-					d.fast_upscale_logged = true;
-				}
+			const char *h_tag = h_exact ? "1:1" : h_up_2x ? "2x" : h_up_4x ? "4x" : "generic";
+			const char *v_tag = (height == buf.height)  ? "1:1"
+			                  : (height > buf.height)    ? "down"
+			                                             : "up";
+			fprintf(stderr,
+			        "[drm_display] Blit path: %ux%u -> %ux%u  H=%s V=%s\n",
+			        width, height, buf.width, buf.height, h_tag, v_tag);
+			d.blit_path_logged = true;
+		}
 
-				// Persistent row buffer — avoids per-frame heap allocation.
-				static thread_local std::vector<uint32_t> expanded_row;
-				if (expanded_row.size() < buf.width)
-					expanded_row.resize(buf.width);
-				const size_t row_bytes = static_cast<size_t>(buf.width) * sizeof(uint32_t);
+		for (uint32_t dst_y = 0; dst_y < buf.height; dst_y++)
+		{
+			// Fixed-point nearest-neighbor vertical row selection.
+			uint32_t src_y = (dst_y * height) / buf.height;
+			if (src_y >= height) src_y = height - 1;
 
-				for (uint32_t src_y = 0; src_y < height; src_y++)
-				{
-					const uint8_t *src_row = rgba + src_y * stride;
-					uint32_t *out = expanded_row.data();
+			const uint8_t *src_row = rgba + src_y * stride;
+			uint8_t *dst_row = buf.map + dst_y * buf.stride;
 
 #ifdef __aarch64__
-					if (scale_x == 2)
-					{
-						// NEON fast path: 8 RGBA pixels → 16 XRGB pixels per iteration.
-						uint32_t src_x = 0;
-						const uint32_t neon_width = width & ~7u; // round down to multiple of 8
-						for (; src_x < neon_width; src_x += 8)
-						{
-							// Deinterleaved load: r[0..7], g[0..7], b[0..7], a[0..7]
-							uint8x8x4_t px = vld4_u8(src_row + src_x * 4);
-							uint8x8_t r = px.val[0];
-							uint8x8_t g = px.val[1];
-							uint8x8_t b = px.val[2];
-							uint8x8_t zero = vdup_n_u8(0);
-
-							// Pack as XRGB8888 (little-endian: B, G, R, 0x00)
-							uint8x8x4_t xrgb;
-							xrgb.val[0] = b;
-							xrgb.val[1] = g;
-							xrgb.val[2] = r;
-							xrgb.val[3] = zero;
-
-							// Duplicate each pixel 2x using zip (interleave with self).
-							// zip gives us pairs: [p0,p0, p1,p1, p2,p2, p3,p3] for lo half,
-							// and [p4,p4, p5,p5, p6,p6, p7,p7] for hi half.
-							// We need to zip each channel independently, then store interleaved.
-
-							uint8x8x2_t b_dup = vzip_u8(xrgb.val[0], xrgb.val[0]);
-							uint8x8x2_t g_dup = vzip_u8(xrgb.val[1], xrgb.val[1]);
-							uint8x8x2_t r_dup = vzip_u8(xrgb.val[2], xrgb.val[2]);
-							uint8x8x2_t a_dup = vzip_u8(xrgb.val[3], xrgb.val[3]);
-
-							// Store first 8 output pixels (src pixels 0-3 doubled)
-							uint8x8x4_t out_lo;
-							out_lo.val[0] = b_dup.val[0];
-							out_lo.val[1] = g_dup.val[0];
-							out_lo.val[2] = r_dup.val[0];
-							out_lo.val[3] = a_dup.val[0];
-							vst4_u8(reinterpret_cast<uint8_t *>(out), out_lo);
-
-							// Store next 8 output pixels (src pixels 4-7 doubled)
-							uint8x8x4_t out_hi;
-							out_hi.val[0] = b_dup.val[1];
-							out_hi.val[1] = g_dup.val[1];
-							out_hi.val[2] = r_dup.val[1];
-							out_hi.val[3] = a_dup.val[1];
-							vst4_u8(reinterpret_cast<uint8_t *>(out + 8), out_hi);
-
-							out += 16;
-						}
-						// Scalar tail for remaining pixels
-						for (; src_x < width; src_x++)
-						{
-							const uint8_t *px = src_row + src_x * 4;
-							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-							*out++ = rgb;
-							*out++ = rgb;
-						}
-					}
-					else if (scale_x == 4)
-					{
-						// NEON fast path: 8 RGBA pixels → 32 XRGB pixels per iteration.
-						uint32_t src_x = 0;
-						const uint32_t neon_width = width & ~7u;
-						for (; src_x < neon_width; src_x += 8)
-						{
-							uint8x8x4_t px = vld4_u8(src_row + src_x * 4);
-							uint8x8_t r = px.val[0];
-							uint8x8_t g = px.val[1];
-							uint8x8_t b = px.val[2];
-							uint8x8_t zero = vdup_n_u8(0);
-
-							// First zip: 1→2 duplication
-							uint8x8x2_t b2 = vzip_u8(b, b);
-							uint8x8x2_t g2 = vzip_u8(g, g);
-							uint8x8x2_t r2 = vzip_u8(r, r);
-							uint8x8x2_t z2 = vzip_u8(zero, zero);
-
-							// Second zip: 2→4 duplication
-							// lo half (src pixels 0-3, each 2x) → zip again for 4x
-							uint8x8x2_t b4_lo = vzip_u8(b2.val[0], b2.val[0]);
-							uint8x8x2_t g4_lo = vzip_u8(g2.val[0], g2.val[0]);
-							uint8x8x2_t r4_lo = vzip_u8(r2.val[0], r2.val[0]);
-							uint8x8x2_t z4_lo = vzip_u8(z2.val[0], z2.val[0]);
-
-							// Pixels 0-1 (each 4x) = 8 output pixels
-							uint8x8x4_t blk0 = { { b4_lo.val[0], g4_lo.val[0], r4_lo.val[0], z4_lo.val[0] } };
-							vst4_u8(reinterpret_cast<uint8_t *>(out), blk0);
-							// Pixels 2-3 (each 4x)
-							uint8x8x4_t blk1 = { { b4_lo.val[1], g4_lo.val[1], r4_lo.val[1], z4_lo.val[1] } };
-							vst4_u8(reinterpret_cast<uint8_t *>(out + 8), blk1);
-
-							// hi half (src pixels 4-7, each 2x) → zip again for 4x
-							uint8x8x2_t b4_hi = vzip_u8(b2.val[1], b2.val[1]);
-							uint8x8x2_t g4_hi = vzip_u8(g2.val[1], g2.val[1]);
-							uint8x8x2_t r4_hi = vzip_u8(r2.val[1], r2.val[1]);
-							uint8x8x2_t z4_hi = vzip_u8(z2.val[1], z2.val[1]);
-
-							// Pixels 4-5 (each 4x)
-							uint8x8x4_t blk2 = { { b4_hi.val[0], g4_hi.val[0], r4_hi.val[0], z4_hi.val[0] } };
-							vst4_u8(reinterpret_cast<uint8_t *>(out + 16), blk2);
-							// Pixels 6-7 (each 4x)
-							uint8x8x4_t blk3 = { { b4_hi.val[1], g4_hi.val[1], r4_hi.val[1], z4_hi.val[1] } };
-							vst4_u8(reinterpret_cast<uint8_t *>(out + 24), blk3);
-
-							out += 32;
-						}
-						for (; src_x < width; src_x++)
-						{
-							const uint8_t *px = src_row + src_x * 4;
-							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-							*out++ = rgb; *out++ = rgb; *out++ = rgb; *out++ = rgb;
-						}
-					}
-					else
-#endif // __aarch64__
-					{
-						// Scalar path for non-2x scales or non-aarch64.
-						for (uint32_t src_x = 0; src_x < width; src_x++)
-						{
-							const uint8_t *px = src_row + src_x * 4;
-							uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-							for (uint32_t rx = 0; rx < scale_x; rx++)
-								*out++ = rgb;
-						}
-					}
-
-					uint32_t dst_base_y = src_y * scale_y;
-					for (uint32_t ry = 0; ry < scale_y; ry++)
-					{
-						uint8_t *dst = buf.map + (dst_base_y + ry) * buf.stride;
-						memcpy(dst, expanded_row.data(), row_bytes);
-					}
-				}
-			}
+			if (h_exact)
+				neon_row_rgba_to_xrgb_1to1(src_row, dst_row, buf.width);
+			else if (h_up_2x)
+				neon_row_rgba_to_xrgb_2x(src_row, dst_row, width);
+			else if (h_up_4x)
+				neon_row_rgba_to_xrgb_4x(src_row, dst_row, width);
 			else
-			{
-				// Fallback for uncommon integer ratios where expanded loops are not worth specializing.
-				for (uint32_t y = 0; y < buf.height; y++)
-				{
-					uint32_t src_y = (y * height) / buf.height;
-					const uint8_t *src_row = rgba + src_y * stride;
-					uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
-					for (uint32_t x = 0; x < buf.width; x++)
-					{
-						uint32_t src_x = (x * width) / buf.width;
-						uint8_t r = src_row[src_x * 4 + 0];
-						uint8_t g = src_row[src_x * 4 + 1];
-						uint8_t b = src_row[src_x * 4 + 2];
-						dst_row[x] = (r << 16) | (g << 8) | b;
-					}
-				}
-			}
-		}
-		else
-		{
-			// Generic path: nearest-neighbor upscale for non-integer scale ratios.
-			for (uint32_t y = 0; y < buf.height; y++)
-			{
-				uint32_t src_y = (y * height) / buf.height;
-				const uint8_t *src_row = rgba + src_y * stride;
-				uint32_t *dst_row = (uint32_t *)(buf.map + y * buf.stride);
-				for (uint32_t x = 0; x < buf.width; x++)
-				{
-					uint32_t src_x = (x * width) / buf.width;
-					uint8_t r = src_row[src_x * 4 + 0];
-					uint8_t g = src_row[src_x * 4 + 1];
-					uint8_t b = src_row[src_x * 4 + 2];
-					dst_row[x] = (r << 16) | (g << 8) | b;
-				}
-			}
+#endif
+				scalar_row_rgba_to_xrgb(src_row, dst_row, width, buf.width);
 		}
 	}
 
@@ -735,6 +698,41 @@ bool drm_display_present(DrmDisplay &d, const uint8_t *rgba, uint32_t width, uin
 	}
 
 	d.current_buffer ^= 1;
+	d.frame_count++;
+	return true;
+}
+
+bool drm_display_flip(DrmDisplay &d, uint32_t fb_id)
+{
+	if (!d.mode_set)
+	{
+		int err = drmModeSetCrtc(d.fd, d.crtc_id, fb_id, 0, 0,
+		                         &d.connector_id, 1, &d.mode_info);
+		if (err < 0)
+		{
+			fprintf(stderr, "[drm_display] flip: initial setCrtc: %s\n", strerror(errno));
+			return false;
+		}
+		d.mode_set = true;
+	}
+	else
+	{
+		int err = drmModePageFlip(d.fd, d.crtc_id, fb_id, 0, nullptr);
+		if (err < 0 && errno == EBUSY)
+		{
+			wait_vblank(d);
+			err = drmModePageFlip(d.fd, d.crtc_id, fb_id, 0, nullptr);
+		}
+		if (err < 0)
+		{
+			if (!d.setcrtc_error_logged)
+			{
+				fprintf(stderr, "[drm_display] flip: pageFlip: %s\n", strerror(errno));
+				d.setcrtc_error_logged = true;
+			}
+			return false;
+		}
+	}
 	d.frame_count++;
 	return true;
 }
