@@ -13,7 +13,7 @@ Current result on tg5050:
 
 ## Target Platform
 
-- Device: TrimUI Brick / tg5050 class device
+- Device: TrimUI Smart Pro S / tg5050 class device
 - SoC: Allwinner
 - GPU: Mali-G57 MP1
 - Display: 1280x720 @ 60Hz
