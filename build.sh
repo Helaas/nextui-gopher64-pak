@@ -197,6 +197,7 @@ cat > .cargo/config.toml << CARGO_EOF
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
 rustflags = [
+    "-C", "target-cpu=cortex-a55",
     "-C", "link-arg=--target=aarch64-unknown-linux-gnu",
     "-C", "link-arg=--sysroot=/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc",
     "-C", "link-arg=-fuse-ld=lld",
@@ -206,6 +207,8 @@ rustflags = [
 CARGO_EOF
 
 echo "--- Starting cargo build (incremental cache enabled) ---"
+export CARGO_PROFILE_RELEASE_LTO=thin
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 cargo build --release --target aarch64-unknown-linux-gnu
 
 echo "--- Copying binary to output ---"

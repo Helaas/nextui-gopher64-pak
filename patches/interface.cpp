@@ -24,6 +24,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
+#include <sched.h>
+#include <strings.h>
 
 using namespace Vulkan;
 
@@ -123,10 +126,12 @@ struct PerfMonitor
 	bool enabled = true;
 	uint64_t window_start_ms = 0;
 	uint32_t frames_in_window = 0;
+	uint64_t sum_frame_gap_us = 0;
 	uint64_t sum_scanout_us = 0;
 	uint64_t sum_render_us = 0;
 	uint64_t sum_flip_us = 0;
 	uint64_t sum_total_us = 0;
+	uint64_t max_frame_gap_us = 0;
 	uint64_t max_scanout_us = 0;
 	uint64_t max_render_us = 0;
 	uint64_t max_flip_us = 0;
@@ -151,6 +156,53 @@ static uint64_t monotonic_us()
 	struct timespec ts = {};
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return uint64_t(ts.tv_sec) * 1000000ull + uint64_t(ts.tv_nsec) / 1000ull;
+}
+
+static bool env_enabled(const char *name)
+{
+	const char *v = getenv(name);
+	if (!v || !v[0])
+		return false;
+	return strcmp(v, "1") == 0 ||
+	       strcasecmp(v, "true") == 0 ||
+	       strcasecmp(v, "yes") == 0 ||
+	       strcasecmp(v, "on") == 0;
+}
+
+static void maybe_pin_to_big_cores()
+{
+	if (!env_enabled("G64_PIN_BIG_CORE"))
+		return;
+
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	int cpu_count = 0;
+
+	for (int cpu = 4; cpu <= 7; cpu++)
+	{
+		char cpu_path[96] = {};
+		snprintf(cpu_path, sizeof(cpu_path), "/sys/devices/system/cpu/cpu%d", cpu);
+		if (access(cpu_path, F_OK) == 0)
+		{
+			CPU_SET(cpu, &set);
+			cpu_count++;
+		}
+	}
+
+	if (cpu_count == 0)
+	{
+		CPU_SET(4, &set);
+		cpu_count = 1;
+	}
+
+	if (sched_setaffinity(0, sizeof(set), &set) == 0)
+	{
+		fprintf(stderr, "[interface] Pinned process threads to performance cores (CPU4-CPU7)\n");
+	}
+	else
+	{
+		fprintf(stderr, "[interface] Failed to pin to performance cores: %s\n", strerror(errno));
+	}
 }
 
 static bool read_text_file(const char *path, char *out, size_t out_size)
@@ -274,6 +326,7 @@ static void init_perf_monitor()
 }
 
 static void perf_monitor_frame(const char *path_tag,
+                               uint64_t frame_gap_us,
                                uint64_t scanout_us,
                                uint64_t render_us,
                                uint64_t flip_us,
@@ -290,10 +343,13 @@ static void perf_monitor_frame(const char *path_tag,
 		perf_monitor.window_start_ms = now_ms;
 
 	perf_monitor.frames_in_window++;
+	perf_monitor.sum_frame_gap_us += frame_gap_us;
 	perf_monitor.sum_scanout_us += scanout_us;
 	perf_monitor.sum_render_us += render_us;
 	perf_monitor.sum_flip_us += flip_us;
 	perf_monitor.sum_total_us += total_us;
+	if (frame_gap_us > perf_monitor.max_frame_gap_us)
+		perf_monitor.max_frame_gap_us = frame_gap_us;
 	if (scanout_us > perf_monitor.max_scanout_us)
 		perf_monitor.max_scanout_us = scanout_us;
 	if (render_us > perf_monitor.max_render_us)
@@ -334,51 +390,63 @@ static void perf_monitor_frame(const char *path_tag,
 	}
 
 	const double frames = double(perf_monitor.frames_in_window);
+	const double avg_gap_ms = double(perf_monitor.sum_frame_gap_us) / (1000.0 * frames);
 	const double avg_scanout_ms = double(perf_monitor.sum_scanout_us) / (1000.0 * frames);
 	const double avg_render_ms = double(perf_monitor.sum_render_us) / (1000.0 * frames);
 	const double avg_flip_ms = double(perf_monitor.sum_flip_us) / (1000.0 * frames);
 	const double avg_total_ms = double(perf_monitor.sum_total_us) / (1000.0 * frames);
+	const double max_gap_ms = double(perf_monitor.max_frame_gap_us) / 1000.0;
 	const double max_total_ms = double(perf_monitor.max_total_us) / 1000.0;
 
 	if (gpu_util >= 0 && gpu_mhz >= 0 && cpu_mhz >= 0)
 	{
 		fprintf(stderr,
 		        "[perf] path=%s fps=%.1f cpu=%dMHz gpu=%d%%@%dMHz "
-		        "stage_ms(avg scanout=%.2f render=%.2f flip=%.2f total=%.2f max_total=%.2f)\n",
+		        "stage_ms(avg gap=%.2f scanout=%.2f render=%.2f flip=%.2f total=%.2f "
+		        "max_gap=%.2f max_total=%.2f)\n",
 		        path_tag, fps, cpu_mhz, gpu_util, gpu_mhz,
-		        avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms, max_total_ms);
+		        avg_gap_ms, avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms,
+		        max_gap_ms, max_total_ms);
 	}
 	else if (gpu_mhz >= 0 && cpu_mhz >= 0)
 	{
 		fprintf(stderr,
 		        "[perf] path=%s fps=%.1f cpu=%dMHz gpu_freq=%dMHz "
-		        "stage_ms(avg scanout=%.2f render=%.2f flip=%.2f total=%.2f max_total=%.2f)\n",
+		        "stage_ms(avg gap=%.2f scanout=%.2f render=%.2f flip=%.2f total=%.2f "
+		        "max_gap=%.2f max_total=%.2f)\n",
 		        path_tag, fps, cpu_mhz, gpu_mhz,
-		        avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms, max_total_ms);
+		        avg_gap_ms, avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms,
+		        max_gap_ms, max_total_ms);
 	}
 	else if (cpu_mhz >= 0)
 	{
 		fprintf(stderr,
 		        "[perf] path=%s fps=%.1f cpu=%dMHz "
-		        "stage_ms(avg scanout=%.2f render=%.2f flip=%.2f total=%.2f max_total=%.2f)\n",
+		        "stage_ms(avg gap=%.2f scanout=%.2f render=%.2f flip=%.2f total=%.2f "
+		        "max_gap=%.2f max_total=%.2f)\n",
 		        path_tag, fps, cpu_mhz,
-		        avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms, max_total_ms);
+		        avg_gap_ms, avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms,
+		        max_gap_ms, max_total_ms);
 	}
 	else
 	{
 		fprintf(stderr,
 		        "[perf] path=%s fps=%.1f "
-		        "stage_ms(avg scanout=%.2f render=%.2f flip=%.2f total=%.2f max_total=%.2f)\n",
+		        "stage_ms(avg gap=%.2f scanout=%.2f render=%.2f flip=%.2f total=%.2f "
+		        "max_gap=%.2f max_total=%.2f)\n",
 		        path_tag, fps,
-		        avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms, max_total_ms);
+		        avg_gap_ms, avg_scanout_ms, avg_render_ms, avg_flip_ms, avg_total_ms,
+		        max_gap_ms, max_total_ms);
 	}
 
 	perf_monitor.window_start_ms = now_ms;
 	perf_monitor.frames_in_window = 0;
+	perf_monitor.sum_frame_gap_us = 0;
 	perf_monitor.sum_scanout_us = 0;
 	perf_monitor.sum_render_us = 0;
 	perf_monitor.sum_flip_us = 0;
 	perf_monitor.sum_total_us = 0;
+	perf_monitor.max_frame_gap_us = 0;
 	perf_monitor.max_scanout_us = 0;
 	perf_monitor.max_render_us = 0;
 	perf_monitor.max_flip_us = 0;
@@ -685,6 +753,7 @@ void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font, size_t font_s
 	}
 
 	gfx_info = _gfx_info;
+	maybe_pin_to_big_cores();
 
 	// Initialize DRM display for scanout
 	if (!drm_display_init(drm_display))
@@ -746,7 +815,10 @@ void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font, size_t font_s
 	device.next_frame_context();
 
 	callback.emu_running = true;
-	callback.enable_speedlimiter = true;
+	const char *disable_speed_limiter_env = getenv("G64_DISABLE_SPEED_LIMITER");
+	callback.enable_speedlimiter = !(disable_speed_limiter_env && disable_speed_limiter_env[0] == '1');
+	if (!callback.enable_speedlimiter)
+		fprintf(stderr, "[interface] Speed limiter disabled via G64_DISABLE_SPEED_LIMITER=1\n");
 	callback.paused = false;
 	callback.save_state_slot = 0;
 	crop_letterbox = false;
@@ -794,6 +866,11 @@ static void render_frame(Vulkan::Device &device)
 {
 	RDP::ScanoutOptions options = {};
 	const uint64_t frame_start_us = monotonic_us();
+	static uint64_t prev_frame_start_us = 0;
+	uint64_t frame_gap_us = 0;
+	if (prev_frame_start_us != 0 && frame_start_us > prev_frame_start_us)
+		frame_gap_us = frame_start_us - prev_frame_start_us;
+	prev_frame_start_us = frame_start_us;
 	options.persist_frame_on_invalid_input = true;
 	options.blend_previous_frame = true;
 	options.upscale_deinterlacing = false;
@@ -874,6 +951,7 @@ static void render_frame(Vulkan::Device &device)
 		{
 			const uint64_t flip_done_us = monotonic_us();
 			perf_monitor_frame("gpu-dmabuf",
+			                   frame_gap_us,
 			                   scanout_done_us - frame_start_us,
 			                   gpu_done_us - scanout_done_us,
 			                   flip_done_us - gpu_done_us,
@@ -917,6 +995,7 @@ static void render_frame(Vulkan::Device &device)
 	{
 		const uint64_t present_done_us = monotonic_us();
 		perf_monitor_frame("cpu-fallback",
+		                   frame_gap_us,
 		                   scanout_done_us - frame_start_us,
 		                   present_done_us - scanout_done_us,
 		                   0,
